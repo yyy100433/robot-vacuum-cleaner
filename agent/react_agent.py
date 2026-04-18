@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Iterable
+from typing import Iterable, Optional
 
 from langchain.agents import create_react_agent, AgentExecutor
 from langchain.prompts import PromptTemplate
@@ -17,9 +17,14 @@ from agent.tools.agent_tools import (
     fetch_external_data,
     fill_context_for_report,
     set_session_context,
+    clear_session_context,
 )
 # 导入扫地机器人推荐工具
 from data.products.tools import recommend_vacuum_robot, get_vacuum_brands, get_product_count
+# 导入 Coze 服务（用于 fallback）
+from services.coze_service import coze_service
+# 导入规划模块
+from agent.planning import PlanningReactAgent, should_use_planning
 
 
 class ReactAgent:
@@ -33,7 +38,7 @@ class ReactAgent:
     # 报告相关关键词
     REPORT_KEYWORDS = ["报告", "生成报告", "使用报告", "查看记录", "使用情况", "个人报告"]
 
-    def __init__(self):
+    def __init__(self, enable_planning: bool = True):
         """初始化可流式执行的 Agent。"""
         # 1. 初始化 LLM
         self.llm = get_chat_model()
@@ -63,6 +68,10 @@ class ReactAgent:
         # 创建基础的 ReAct 提示模板
         react_template = self._build_react_template(self.base_prompt)
         self.prompt = PromptTemplate.from_template(react_template)
+
+        # 4. 初始化规划 Agent（如果启用）
+        self.enable_planning = enable_planning
+        self.planning_agent = PlanningReactAgent(self.tools) if enable_planning else None
 
     @staticmethod
     def _load_prompt_template(filename: str) -> str:
@@ -208,6 +217,12 @@ Thought: {{agent_scratchpad}}"""
 
         return facts
 
+    def _should_use_planning(self, input_text: str, chat_history: str = "") -> bool:
+        """判断是否需要使用规划模式。"""
+        if not self.enable_planning or not self.planning_agent:
+            return False
+        return should_use_planning(input_text, chat_history)
+
     def execute_stream(self, messages: list[dict]):
         """执行一次带历史上下文的流式对话。"""
         normalized_messages = self._normalize_messages(messages)
@@ -234,14 +249,59 @@ Thought: {{agent_scratchpad}}"""
             chat_history=chat_history
         )
 
+        # 判断是否需要使用规划模式
+        use_planning = self._should_use_planning(last_user_message, chat_history)
+
+        if use_planning:
+            # 使用规划模式执行
+            yield from self._execute_with_planning(
+                last_user_message, chat_history, session_facts
+            )
+        else:
+            # 使用传统 ReAct 模式执行
+            yield from self._execute_with_react(
+                last_user_message, chat_history, session_facts
+            )
+
+        # 清理会话上下文
+        clear_session_context()
+
+    def _execute_with_planning(
+        self,
+        query: str,
+        chat_history: str,
+        session_facts: dict
+    ):
+        """使用规划模式执行（流式输出）"""
+        try:
+            # 流式执行规划
+            for chunk in self.planning_agent.execute_stream(
+                query=query,
+                chat_history=chat_history,
+                city=session_facts.get("city"),
+                user_id=session_facts.get("user_id")
+            ):
+                yield chunk
+        except Exception as e:
+            # 规划执行失败，回退到传统模式
+            print(f"[INFO] 规划执行失败，回退到 ReAct 模式: {e}")
+            yield from self._execute_with_react(query, chat_history, session_facts)
+
+    def _execute_with_react(
+        self,
+        query: str,
+        chat_history: str,
+        session_facts: dict
+    ):
+        """使用传统 ReAct 模式执行"""
         # 将会话中提取的事实融入问题（如城市、用户ID）
-        enhanced_input = last_user_message
+        enhanced_input = query
         if session_facts.get("city"):
             enhanced_input = f"[用户所在城市：{session_facts['city']}] {enhanced_input}"
         if session_facts.get("user_id"):
             enhanced_input = f"[用户ID：{session_facts['user_id']}] {enhanced_input}"
 
-        # AgentExecutor 需要的输入格式（不需要 intermediate_steps 和 agent_scratchpad）
+        # AgentExecutor 需要的输入格式
         input_dict = {
             "input": enhanced_input,
             "chat_history": chat_history,
@@ -249,24 +309,55 @@ Thought: {{agent_scratchpad}}"""
 
         try:
             # 根据输入场景获取对应的 AgentExecutor
-            agent_executor = self._get_agent_executor(last_user_message)
+            agent_executor = self._get_agent_executor(query)
 
             # 使用 AgentExecutor.invoke 来完整执行工具调用循环
             result = agent_executor.invoke(input_dict)
-
             # 提取输出 - AgentExecutor 总是返回 dict，有 'output' 字段
             if isinstance(result, dict):
                 output = result.get("output", "")
                 if not output:
                     output = "我目前无法回答这个问题。"
-                yield output
             else:
-                yield str(result)
+                output = str(result)
+
+            # 如果输出为空、无法回答问题，或包含"未找到"/"没有"等关键词，fallback 到 Coze
+            need_fallback = (
+                not output
+                or output == "我目前无法回答这个问题。"
+                or "未找到" in output
+                or "没有符合" in output
+                or "暂时没有" in output
+                or "没有找到" in output
+                or "目前没有找到" in output
+                or output.startswith("很抱歉")
+            )
+
+            if need_fallback:
+                print(f"[INFO] 触发 Coze fallback，原输出：{output[:100]}...")
+                success, answer = coze_service.chat_and_save(query, chat_history)
+
+                if success and answer:
+                    output = answer + chr(10) + chr(10) + "参考来源：" + chr(10) + "- Coze 智能体（已自动收录到本地知识库）"
+                else:
+                    output = "我目前无法回答这个问题，智能体服务也暂时不可用。请稍后重试或尝试换个方式提问。"
+
+            yield output
 
         except Exception as e:
             import traceback
             traceback.print_exc()
-            yield f"执行出错: {str(e)}"
+
+            # Agent 执行异常时，尝试 fallback 到 Coze
+            try:
+                success, answer = coze_service.chat_and_save(query, chat_history)
+                if success and answer:
+                    yield answer + chr(10) + chr(10) + "参考来源：" + chr(10) + "- Coze 智能体（已自动收录到本地知识库）"
+                    return
+            except Exception as coze_e:
+                print(f"[ERROR] Coze fallback 也失败：{coze_e}")
+
+            yield f"执行出错：{str(e)}"
 
 
 if __name__ == '__main__':

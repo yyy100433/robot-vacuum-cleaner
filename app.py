@@ -656,35 +656,37 @@ if prompt:
 
     try:
         import re
-        with st.spinner("正在分析问题并检索答案..."):
-            res_stream = st.session_state["agent"].execute_stream(current_messages)
-            with st.chat_message("assistant", avatar="🤖"):
-                response_placeholder = st.empty()
-                for chunk in res_stream:
-                    response_chunks.append(chunk)
-
-        response_text = "".join(response_chunks).strip()
-
-        # 清理输出：提取干净的 final answer
-        if "return_values" in response_text or "log=" in response_text:
-            # 尝试提取 output 字段中的内容
-            output_match = re.search(r"'output':\s*'([^']+)'", response_text)
-            if output_match:
-                response_text = output_match.group(1)
-            else:
-                # 尝试提取 Final Answer
-                final_match = re.search(r"Final Answer:\s*([^\\]+)", response_text)
-                if final_match:
-                    response_text = final_match.group(1).strip()
-
-        if not response_text:
-            response_text = "暂时没有生成有效回答，请重试。"
-        elif "执行出错" in response_text:
-            response_text = "处理您的问题时遇到了技术问题，请重试或换个方式提问。"
-
-        # 渲染最终干净的答案
         with st.chat_message("assistant", avatar="🤖"):
             response_placeholder = st.empty()
+            res_stream = st.session_state["agent"].execute_stream(current_messages)
+
+            full_response = []
+            in_planning_mode = False
+
+            for chunk in res_stream:
+                full_response.append(chunk)
+                current_text = "".join(full_response)
+
+                # 检测是否进入规划模式
+                if "🤔 正在分析" in current_text or "📋 执行计划" in current_text:
+                    in_planning_mode = True
+
+                # 规划模式下，实时显示过程
+                if in_planning_mode:
+                    response_placeholder.markdown(current_text)
+                else:
+                    # 普通模式下，只显示最终结果
+                    pass
+
+            response_text = "".join(full_response).strip()
+
+            # 最终清理和展示
+            if not response_text:
+                response_text = "暂时没有生成有效回答，请重试。"
+            elif "执行出错" in response_text:
+                response_text = "处理您的问题时遇到了技术问题，请重试或换个方式提问。"
+
+            # 渲染最终干净的答案
             body, references = split_response_and_references(response_text)
             response_placeholder.markdown(body or response_text)
             render_references(references)

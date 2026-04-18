@@ -1,0 +1,17 @@
+skills:
+  product-recommendation:
+    enabled: true
+    priority: 1
+    description: "根据用户需求推荐合适的扫地机器人产品"
+  fault-diagnosis:
+    enabled: true
+    priority: 2
+    description: "诊断扫地机器人常见故障，提供排查步骤和解决方案"
+  report-generation:
+    enabled: true
+    priority: 3
+    description: "为用户生成扫地机器人使用报告和数据分析"
+  maintenance:
+    enabled: true
+    priority: 4
+    description: "提供保养计划、耗材更换提醒、日常维护指导"

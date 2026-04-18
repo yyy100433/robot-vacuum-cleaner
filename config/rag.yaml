@@ -1,2 +1,2 @@
-chat_model_name: qwen3-max
+chat_model_name: qwen3-max-2025-09-23
 embedding_model_name: text-embedding-v4

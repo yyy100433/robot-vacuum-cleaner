@@ -7,6 +7,13 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_community.chat_models.tongyi import ChatTongyi
+
+# 加载 .env 文件（如果尚未加载）
+from dotenv import load_dotenv
+from utils.path_tool import get_abs_path
+if not os.getenv("DASHSCOPE_API_KEY"):
+    load_dotenv(get_abs_path(".env"))
+
 from utils.config_handler import rag_conf
 
 

@@ -126,6 +126,8 @@ def _create_settings_with_no_telemetry():
     """创建一个完全禁用遥测的 Settings 对象"""
     return Settings(
         anonymized_telemetry=False,
+        allow_reset=True,
+        is_persistent=True,
     )
 
 # 导入后再次确保 Chroma 类的 _telemetry_client 被禁用
@@ -216,20 +218,58 @@ class VectorStoreService:
             )
         except Exception as e:
             logger.warning(f"创建向量库失败，尝试重建: {str(e)}")
-            # 如果创建失败，尝试清理并重建
-            try:
-                if os.path.exists(self.persist_directory):
+            return self._rebuild_vector_store()
+
+    def _rebuild_vector_store(self):
+        """清理并重建向量库。"""
+        try:
+            # 确保关闭所有可能占用文件的句柄
+            import gc
+            gc.collect()
+
+            # 彻底删除整个向量库目录
+            if os.path.exists(self.persist_directory):
+                try:
                     shutil.rmtree(self.persist_directory)
-                os.makedirs(self.persist_directory, exist_ok=True)
-                return Chroma(
-                    collection_name=self.collection_name,
-                    embedding_function=get_embedding_model(),
-                    persist_directory=self.persist_directory,
-                    client_settings=_create_settings_with_no_telemetry(),
-                )
-            except Exception as e2:
-                logger.error(f"重建向量库失败: {str(e2)}")
-                raise
+                    logger.info(f"已删除损坏的向量库目录: {self.persist_directory}")
+                except Exception as e:
+                    logger.warning(f"删除向量库目录失败: {str(e)}")
+                    # 尝试强制删除
+                    import time
+                    time.sleep(0.5)
+                    if os.path.exists(self.persist_directory):
+                        shutil.rmtree(self.persist_directory, ignore_errors=True)
+
+            # 重新创建目录
+            os.makedirs(self.persist_directory, exist_ok=True)
+
+            # 清理 manifest 文件
+            if os.path.exists(self.manifest_store):
+                try:
+                    os.remove(self.manifest_store)
+                    logger.info(f"已删除 manifest: {self.manifest_store}")
+                except Exception as e:
+                    logger.warning(f"删除 manifest 失败: {str(e)}")
+
+            # 清理旧版 md5 文件
+            if os.path.exists(self.md5_hex_store):
+                try:
+                    os.remove(self.md5_hex_store)
+                    logger.info(f"已删除 md5 文件: {self.md5_hex_store}")
+                except Exception as e:
+                    logger.warning(f"删除 md5 文件失败: {str(e)}")
+
+            # 重新创建 Chroma 实例
+            logger.info("正在重建向量库...")
+            return Chroma(
+                collection_name=self.collection_name,
+                embedding_function=get_embedding_model(),
+                persist_directory=self.persist_directory,
+                client_settings=_create_settings_with_no_telemetry(),
+            )
+        except Exception as e2:
+            logger.error(f"重建向量库失败: {str(e2)}", exc_info=True)
+            raise
 
     def get_retriever(self):
         return self.vector_store.as_retriever(search_kwargs={"k": chroma_conf['k']})

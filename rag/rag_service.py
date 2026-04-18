@@ -246,7 +246,7 @@ class RagSummarizeService(object):
         try:
             context_docs = self.retriever_docs(query, chat_history)
         except Exception as e:
-            logger.error(f"RAG检索流程异常: {str(e)}”, exc_info=True)")
+            logger.error(f"RAG检索流程异常: {str(e)}", exc_info=True)
             return "知识库检索暂时不可用,请稍后重试."
 
         if not context_docs:
@@ -274,7 +274,18 @@ class RagSummarizeService(object):
                     "context": context,
                 }
             )
-            return answer.strip() + self._format_references(context_docs)
+            answer = answer.strip()
+
+            # 检查 LLM 返回是否表明知识库内容不足
+            no_answer_keywords = ['未检索到', '没有找到', '没有足够', '资料不足', '信息不足', '无法回答', '抱歉', '暂无数据', '未接入']
+            is_no_answer = any(kw in answer for kw in no_answer_keywords)
+
+            if is_no_answer:
+                # LLM 表示知识库内容不足，触发 Coze fallback
+                logger.info(f"LLM 判断知识库内容不足，触发 Coze fallback")
+                return self._fallback_to_coze(query, chat_history, f"知识库内容不足：{answer[:50]}")
+
+            return answer + self._format_references(context_docs)
         except Exception as e:
             logger.error(f"RAG总结失败: {str(e)}", exc_info=True)
             return "知识总结暂时不可用，请稍后重试。"

@@ -193,6 +193,177 @@ def generate_external_data():
             }
 
 
+def _save_user_to_csv(user_id: str, month: str, record: dict):
+    """将新用户记录追加保存到CSV文件中，实现数据持久化。"""
+    external_data_path = get_abs_path(agent_conf["external_data_path"])
+
+    with open(external_data_path, "a", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["用户ID", "特征", "清洁效率", "耗材", "对比", "时间"])
+        # 如果文件为空或只有表头，先写入表头
+        if f.tell() == 0:
+            writer.writeheader()
+        writer.writerow({
+            "用户ID": user_id,
+            "特征": record.get("特征", ""),
+            "清洁效率": record.get("效率", ""),
+            "耗材": record.get("耗材", ""),
+            "对比": record.get("对比", ""),
+            "时间": month
+        })
+    logger.info(f"新用户 {user_id} 的记录已持久化到CSV文件")
+
+
+@tool
+def create_user_report(input_data: str):
+    """为新用户创建初始报告数据。当用户ID不存在时，自动创建该用户的基础记录。
+
+    参数格式：
+    JSON字符串：{"user_id": "1011", "profile": "80㎡公寓 | 单身 | 木地板", "month": "2026-04"}
+    month 可省略，默认使用当前月份；profile 可省略，默认使用通用画像。
+
+    返回:
+        创建成功的提示信息或错误信息
+    """
+    generate_external_data()
+
+    # 解析输入
+    user_id = ""
+    profile = ""
+    month = ""
+
+    try:
+        if input_data.startswith("{") and input_data.endswith("}"):
+            data = json.loads(input_data)
+            user_id = data.get("user_id", "").strip()
+            profile = data.get("profile", "").strip()
+            month = data.get("month", "").strip()
+        else:
+            # 如果不是JSON，当作user_id处理
+            user_id = input_data.strip()
+    except json.JSONDecodeError:
+        return "JSON解析失败，请使用正确格式：{\"user_id\": \"1011\", \"profile\": \"用户画像\"}"
+
+    if not user_id:
+        return "用户ID不能为空。"
+
+    user_id = user_id.strip()
+
+    # 验证用户ID格式（应该是数字）
+    if not user_id.isdigit():
+        return "用户ID必须是纯数字格式，如 '1011'。"
+
+    # 检查用户是否已存在
+    if user_id in external_data:
+        return f"用户 {user_id} 已存在，无需创建。现有月份：{', '.join(sorted(external_data[user_id].keys()))}"
+
+    # 使用当前月份作为默认值
+    if not month:
+        month = datetime.now().strftime("%Y-%m")
+
+    # 创建默认的用户画像（如果未提供）
+    if not profile:
+        profile = "未知户型 | 未知居住情况 | 未知地面类型"
+
+    # 创建初始记录数据
+    initial_record = {
+        "特征": profile,
+        "效率": "新用户暂无清洁效率数据\n建议先进行首次清扫以收集数据",
+        "耗材": "主刷寿命:全新\n滤网状态:全新\n边刷状态:全新",
+        "对比": "新用户暂无对比数据"
+    }
+
+    # 添加到内存数据
+    external_data[user_id] = {month: initial_record}
+
+    # 持久化到CSV文件
+    _save_user_to_csv(user_id, month, initial_record)
+
+    return (
+        f"已成功为新用户 {user_id} 创建初始报告数据。\n"
+        f"用户画像：{profile}\n"
+        f"初始月份：{month}\n"
+        f"提示：建议用户先进行首次清扫，后续将自动更新使用数据。"
+    )
+
+
+def _update_csv_user_profile(user_id: str, new_profile: str):
+    """更新CSV文件中指定用户的画像信息（特征字段）。"""
+    external_data_path = get_abs_path(agent_conf["external_data_path"])
+
+    # 读取所有数据
+    rows = []
+    with open(external_data_path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        for row in reader:
+            if row.get("用户ID") == user_id:
+                row["特征"] = new_profile
+            rows.append(row)
+
+    # 重新写入文件
+    with open(external_data_path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    logger.info(f"用户 {user_id} 的画像信息已更新并持久化到CSV文件")
+
+
+@tool
+def update_user_profile(input_data: str):
+    """更新指定用户的画像信息。用于修改用户的房屋面积、居住情况、地面类型等基础特征。
+
+    参数可以是两种格式：
+    1. JSON字符串：{"user_id": "1011", "profile": "120㎡ | 有宠物 | 无地毯"}
+    2. 单参数字符串（user_id）：配合 profile 参数（但建议用JSON格式）
+
+    返回:
+        更新结果信息
+    """
+    generate_external_data()
+
+    # 解析输入，支持 JSON 格式
+    user_id = ""
+    profile = ""
+
+    try:
+        if input_data.startswith("{") and input_data.endswith("}"):
+            data = json.loads(input_data)
+            user_id = data.get("user_id", "").strip()
+            profile = data.get("profile", "").strip()
+        else:
+            # 如果不是JSON，当作user_id处理（需要额外提供profile，此处报错提示）
+            return "请使用JSON格式输入，如：{\"user_id\": \"1011\", \"profile\": \"120㎡ | 有宠物 | 无地毯\"}"
+    except json.JSONDecodeError:
+        return "JSON解析失败，请使用正确格式：{\"user_id\": \"1011\", \"profile\": \"120㎡ | 有宠物 | 无地毯\"}"
+
+    if not user_id:
+        return "用户ID不能为空。"
+
+    if not profile:
+        return "用户画像信息不能为空。"
+
+    # 检查用户是否存在
+    if user_id not in external_data:
+        return f"用户 {user_id} 不存在，请先创建用户。可使用 create_user_report 工具创建新用户。"
+
+    # 更新内存中所有月份的用户画像
+    updated_months = []
+    for month, record in external_data[user_id].items():
+        record["特征"] = profile
+        updated_months.append(month)
+
+    # 持久化到CSV文件
+    _update_csv_user_profile(user_id, profile)
+
+    return (
+        f"已成功更新用户 {user_id} 的画像信息。\n"
+        f"新画像：{profile}\n"
+        f"已更新月份：{', '.join(sorted(updated_months))}\n"
+        f"提示：画像信息已同步更新到所有历史记录中。"
+    )
+
+
 @tool
 def list_report_months(user_id: str):
     """列出指定用户有哪些可查询的报告月份。"""
@@ -234,8 +405,17 @@ def get_user_profile(user_id: str):
 
 
 @tool
-def fetch_external_data(user_id: str, month: str = ""):
-    """获取指定用户在指定月份的使用记录。可以传入 user_id 和 month 作为单独参数，也可以传入 JSON 格式如 {"user_id": "1001", "month": "2025-12"}。"""
+def fetch_external_data(user_id: str, month: str = "", profile: str = "", auto_create: bool = True):
+    """获取指定用户在指定月份的使用记录。当用户不存在时自动创建初始报告。
+
+    参数:
+        user_id: 用户ID（可以是数字格式或JSON字符串）
+        month: 查询月份，为空时使用最近月份
+        profile: 用户画像信息，仅在自动创建新用户时使用，格式如 "80㎡公寓 | 单身 | 木地板"
+        auto_create: 是否在用户不存在时自动创建，默认为True
+
+    可以传入 JSON 格式如 {"user_id": "1001", "month": "2025-12", "profile": "80㎡公寓"}。
+    """
     generate_external_data()
 
     # 尝试解析 JSON 格式的输入
@@ -245,15 +425,31 @@ def fetch_external_data(user_id: str, month: str = ""):
             data = json.loads(user_id)
             user_id = data.get("user_id", "").strip()
             month = data.get("month", "").strip()
+            profile = data.get("profile", "").strip()
     except (json.JSONDecodeError, AttributeError):
         pass
 
     if not user_id:
         return "用户ID不能为空。"
 
+    # 当用户不存在时，自动创建新用户报告
     if user_id not in external_data:
-        logger.warning(f"未能检索到用户{user_id}的使用数据")
-        return "未检索到该用户的使用数据。"
+        if auto_create:
+            logger.info(f"用户 {user_id} 不存在，自动创建初始报告")
+            create_result = create_user_report.invoke({"user_id": user_id, "profile": profile, "month": month})
+            if "已成功" in create_result:
+                # 创建成功后，返回新创建的数据
+                current_month = month or datetime.now().strftime("%Y-%m")
+                return (
+                    f"{create_result}\n\n"
+                    f"=== 新用户初始数据 ===\n"
+                    f"{_format_record(user_id, current_month, external_data[user_id][current_month])}"
+                )
+            else:
+                return create_result
+        else:
+            logger.warning(f"未能检索到用户{user_id}的使用数据")
+            return "未检索到该用户的使用数据。如需创建新用户，请使用 create_user_report 工具。"
 
     # 如果未指定月份，使用最新月份
     if not month:
@@ -302,6 +498,9 @@ __all__ = [
     'rag_summarize', 'get_weather', 'get_user_location', 'get_user_id',
     'get_current_month', 'list_report_months', 'fetch_latest_external_data',
     'get_user_profile', 'fetch_external_data', 'fill_context_for_report',
-    'set_session_context', 'clear_session_context',
+    'create_user_report', 'update_user_profile',
     'recommend_vacuum_robot', 'get_vacuum_brands', 'get_product_count',
 ]
+
+# 注意：set_session_context 和 clear_session_context 不是工具，
+# 它们是内部使用的上下文管理函数，不需要暴露给 LLM 作为可调用工具
