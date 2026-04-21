@@ -45,6 +45,8 @@ def get_logger(
 
     # 避免重复添加处理器，否则在 Streamlit 重跑时会重复打印日志。
     if logger.handlers:
+        # 即使 handler 已存在，启动时仍执行一次日志清理
+        _cleanup_old_logs(LOG_ROOT, keep_days=3)
         return logger
 
     # 控制台用于实时观察应用行为。

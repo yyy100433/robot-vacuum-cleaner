@@ -223,13 +223,13 @@ class CozeService:
         if any(kw in query for kw in maintenance_keywords):
             return "coze_fallback_维护保养.txt"
 
-        # 选购相关关键词
+        # 选购相关关键词 - 保存到专门的 coze 推荐文件，不写入选购指南.txt
         purchase_keywords = [
             '推荐', '哪款', '哪个', '买什么', '怎么选', '选什么', '性价比',
             '排行榜', '对比', '哪个好', '适合', '购买', '值得', '型号', '新款'
         ]
         if any(kw in query for kw in purchase_keywords):
-            return "选购指南.txt"
+            return f"coze_product_recommendations_{datetime.now().strftime('%Y%m%d')}.txt"
 
         # 默认保存到通用 fallback 文件
         return "coze_fallback_answers.txt"

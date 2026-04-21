@@ -120,34 +120,15 @@ _disable_telemetry_early()
 
 from langchain_chroma import Chroma
 from chromadb.config import Settings
-
-# 确保 Settings 使用最低的遥测配置
-def _create_settings_with_no_telemetry():
-    """创建一个完全禁用遥测的 Settings 对象"""
-    return Settings(
-        anonymized_telemetry=False,
-        allow_reset=True,
-        is_persistent=True,
-    )
-
-# 导入后再次确保 Chroma 类的 _telemetry_client 被禁用
-def _patch_chroma_telemetry():
-    """Patch Chroma class to disable telemetry client"""
-    try:
-        if hasattr(Chroma, '_telemetry_client'):
-            Chroma._telemetry_client = None
-    except Exception:
-        pass
-
-_patch_chroma_telemetry()
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from utils.config_handler import chroma_conf
 from model.factory import get_embedding_model
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from utils.path_tool import get_abs_path
 import hashlib
 import json
 import os
 import shutil
+import re
 from datetime import datetime
 from utils.file_handler import (
     clean_text,
@@ -159,6 +140,186 @@ from utils.file_handler import (
     txt_loader,
 )
 from utils.logger_handler import logger
+
+
+# 确保 Settings 使用最低的遥测配置
+def _create_settings_with_no_telemetry():
+    """创建一个完全禁用遥测的 Settings 对象"""
+    return Settings(
+        anonymized_telemetry=False,
+        allow_reset=True,
+        is_persistent=True,
+    )
+
+
+# 导入后再次确保 Chroma 类的 _telemetry_client 被禁用
+def _patch_chroma_telemetry():
+    """Patch Chroma class to disable telemetry client"""
+    try:
+        if hasattr(Chroma, '_telemetry_client'):
+            Chroma._telemetry_client = None
+    except Exception:
+        pass
+
+
+_patch_chroma_telemetry()
+
+
+class ParagraphSentenceTextSplitter(RecursiveCharacterTextSplitter):
+    """基于段落和完整句子的文本切分器。
+
+    切分优先级：
+    1. 先按段落切分（双换行符 \n\n）
+    2. 如果段落过长，再按完整句子切分（句号、问号、感叹号等）
+    3. 确保句子完整性，不会在句子中间切断
+    """
+
+    def __init__(
+        self,
+        chunk_size: int = 400,
+        chunk_overlap: int = 50,
+        length_function=len,
+        **kwargs
+    ):
+        # 定义切分优先级：段落 > 句子 > 短语 > 词 > 字符
+        separators = [
+            "\n\n",      # 段落分隔（最高优先级）
+            "\n",        # 行分隔
+            "。",        # 中文句号
+            "？",        # 中文问号
+            "！",        # 中文感叹号
+            "；",        # 中文分号
+            ".",         # 英文句号
+            "?",         # 英文问号
+            "!",         # 英文感叹号
+            ";",         # 英文分号
+            "，",        # 中文逗号
+            ",",         # 英文逗号
+            " ",         # 空格
+            "",          # 最后按字符切分
+        ]
+        super().__init__(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=separators,
+            length_function=length_function,
+            **kwargs
+        )
+
+    def split_text(self, text: str) -> list[str]:
+        """按段落和句子切分文本，确保句子完整性。"""
+        # 先清理文本
+        text = self._clean_text_for_split(text)
+
+        # 第一步：按段落切分
+        paragraphs = self._split_by_paragraphs(text)
+
+        # 第二步：对过长的段落按句子切分
+        chunks = []
+        for paragraph in paragraphs:
+            if len(paragraph) <= self._chunk_size:
+                chunks.append(paragraph)
+            else:
+                # 段落过长，按句子切分并合并
+                sentence_chunks = self._split_long_paragraph(paragraph)
+                chunks.extend(sentence_chunks)
+
+        # 第三步：合并过短的相邻块，避免碎片化
+        final_chunks = self._merge_short_chunks(chunks)
+
+        return final_chunks
+
+    def _clean_text_for_split(self, text: str) -> str:
+        """清理文本，统一换行格式。"""
+        # 统一换行符
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        # 去除多余空白
+        text = re.sub(r"[ \t]+", " ", text)
+        # 确保段落分隔符是双换行
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _split_by_paragraphs(self, text: str) -> list[str]:
+        """按双换行符切分段落。"""
+        paragraphs = text.split("\n\n")
+        # 清理每个段落并过滤空段落
+        return [p.strip() for p in paragraphs if p.strip()]
+
+    def _split_long_paragraph(self, paragraph: str) -> list[str]:
+        """将过长的段落按完整句子切分，并智能合并。"""
+        # 提取完整句子
+        sentences = self._extract_sentences(paragraph)
+
+        # 按chunk_size合并句子
+        chunks = []
+        current_chunk = ""
+
+        for sentence in sentences:
+            # 如果单个句子就超过chunk_size，需要进一步切分
+            if len(sentence) > self._chunk_size:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                    current_chunk = ""
+                # 对超长句子按分隔符递归切分
+                super_long_chunks = super().split_text(sentence)
+                chunks.extend(super_long_chunks)
+            elif len(current_chunk) + len(sentence) <= self._chunk_size:
+                current_chunk += sentence
+            else:
+                # 当前块已满，保存并开始新块
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence
+
+        # 保存最后一个块
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+
+        return chunks
+
+    def _extract_sentences(self, text: str) -> list[str]:
+        """提取完整句子，保留句子结尾的标点符号。"""
+        # 匹配中文和英文句子结尾（包括可能的引号）
+        sentence_endings = re.compile(r'([。？！；.?!;]+["\'」』]?)')
+
+        # 在句子结尾后插入分隔标记
+        text_with_markers = sentence_endings.sub(r'\1<SPLIT>', text)
+
+        # 按标记切分
+        raw_sentences = text_with_markers.split('<SPLIT>')
+
+        # 清理并保留非空句子
+        sentences = []
+        for s in raw_sentences:
+            s = s.strip()
+            if s:
+                sentences.append(s)
+
+        return sentences
+
+    def _merge_short_chunks(self, chunks: list[str]) -> list[str]:
+        """合并过短的相邻块，避免碎片化。"""
+        min_chunk_size = 50  # 最小块大小，低于此值尝试合并
+
+        merged = []
+        i = 0
+
+        while i < len(chunks):
+            current = chunks[i]
+
+            # 如果当前块太短且有下一块，尝试合并
+            while (
+                i + 1 < len(chunks)
+                and len(current) < min_chunk_size
+                and len(current) + len(chunks[i + 1]) <= self._chunk_size
+            ):
+                i += 1
+                current = current + "\n" + chunks[i]
+
+            merged.append(current)
+            i += 1
+
+        return merged
 
 
 class VectorStoreService:
@@ -177,29 +338,21 @@ class VectorStoreService:
         if manifest_dir:
             os.makedirs(manifest_dir, exist_ok=True)
         self.vector_store = self._create_vector_store()
-        self.default_splitter = self._build_splitter(
+        # 使用新的段落-句子切分器
+        self.default_splitter = ParagraphSentenceTextSplitter(
             chunk_size=chroma_conf['chunk_size'],
             chunk_overlap=chroma_conf['chunk_overlap'],
         )
-        self.txt_splitter = self._build_splitter(
+        self.txt_splitter = ParagraphSentenceTextSplitter(
             chunk_size=chroma_conf.get('txt_chunk_size', chroma_conf['chunk_size']),
             chunk_overlap=chroma_conf.get('txt_chunk_overlap', chroma_conf['chunk_overlap']),
         )
-        self.pdf_splitter = self._build_splitter(
+        self.pdf_splitter = ParagraphSentenceTextSplitter(
             chunk_size=chroma_conf.get('pdf_chunk_size', chroma_conf['chunk_size']),
             chunk_overlap=chroma_conf.get('pdf_chunk_overlap', chroma_conf['chunk_overlap']),
         )
 
-    def _build_splitter(self, chunk_size: int, chunk_overlap: int) -> RecursiveCharacterTextSplitter:
-        """按给定参数构造切块器，便于 txt/pdf 分别调参。"""
-        return RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            separators=chroma_conf['separators'],
-            length_function=len,
-        )
-
-    def _get_splitter(self, read_path: str) -> RecursiveCharacterTextSplitter:
+    def _get_splitter(self, read_path: str):
         """根据文件类型选择更合适的切块器。"""
         if read_path.endswith(".txt"):
             return self.txt_splitter

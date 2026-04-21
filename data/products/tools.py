@@ -4,9 +4,103 @@
 扫地机器人推荐工具 (LangChain Tools)
 """
 
-from typing import Optional, Dict, Any
+import re
+import json
+from typing import Optional, Dict, Any, Union
 from langchain_core.tools import StructuredTool
 from data.products.recommender import VacuumRobotRecommender
+
+
+def _parse_user_requirements(input_data: Union[str, Dict]) -> Dict:
+    """
+    解析用户输入的需求，支持自然语言描述和结构化参数。
+
+    输入可以是：
+    1. 自然语言描述："房屋80平米，预算3000元，有宠物，木地板"
+    2. JSON字符串：{"house_area": 80, "max_price": 3000}
+    3. 字典：{"house_area": 80, "max_price": 3000}
+
+    返回结构化参数字典。
+    """
+    # 如果已经是字典，直接返回
+    if isinstance(input_data, dict):
+        return input_data
+
+    # 尝试解析 JSON
+    if isinstance(input_data, str):
+        input_data = input_data.strip()
+        if input_data.startswith("{") and input_data.endswith("}"):
+            try:
+                return json.loads(input_data)
+            except json.JSONDecodeError:
+                pass
+
+    # 解析自然语言描述
+    params = {}
+    text = str(input_data).lower()
+
+    # 解析房屋面积
+    area_patterns = [
+        r"(\d+)[\s]*平米",
+        r"(\d+)[\s]*平方米",
+        r"(\d+)[\s]*㎡",
+        r"面积[\s:：]*(\d+)",
+        r"(\d+)[\s]*平",
+    ]
+    for pattern in area_patterns:
+        match = re.search(pattern, text)
+        if match:
+            params["house_area"] = int(match.group(1))
+            break
+
+    # 解析预算/价格
+    price_patterns = [
+        r"预算[\s:：]*(\d+)",
+        r"价格[\s:：]*(\d+)",
+        r"(\d+)[\s]*元",
+        r"(\d+)[\s]*块钱",
+        r"(\d+)块",
+    ]
+    for pattern in price_patterns:
+        match = re.search(pattern, text)
+        if match:
+            params["max_price"] = int(match.group(1))
+            break
+
+    # 解析品牌
+    brands = ["小米", "云鲸", "美的", "石头", "科沃斯", "追觅", "iRobot", "海尔", "格力", "戴森"]
+    for brand in brands:
+        if brand in text:
+            params["brand"] = brand
+            break
+
+    # 解析宠物相关
+    if "宠物" in text or "猫" in text or "狗" in text or "养宠" in text:
+        params["has_pet"] = True
+        # 有宠物通常需要更高吸力来清理毛发
+        params["min_suction_power"] = 2500
+
+    # 解析地毯相关
+    if "地毯" in text:
+        params["has_carpet"] = True
+
+    # 解析地板类型
+    if "木地板" in text or "木质" in text or "实木" in text:
+        params["floor_type"] = "wood"
+    elif "瓷砖" in text or "大理石" in text:
+        params["floor_type"] = "tile"
+
+    # 解析拖地需求
+    if "拖地" in text or "扫拖" in text or "拖布" in text:
+        params["need_mopping"] = True
+
+    # 解析导航类型
+    if "激光" in text or "lds" in text:
+        params["navigation_type"] = "激光"
+    elif "视觉" in text:
+        params["navigation_type"] = "视觉"
+
+    return params
 
 
 def _recommend_vacuum_robot_fn(
@@ -18,10 +112,40 @@ def _recommend_vacuum_robot_fn(
     house_area: int = 100,
     need_mopping: bool = False,
     need_self_charging: bool = False,
-    limit: int = 5
+    limit: int = 5,
+    # 额外参数（支持自然语言解析）
+    input_description: Optional[str] = None,
+    has_pet: bool = False,
+    has_carpet: bool = False,
+    floor_type: Optional[str] = None
 ) -> str:
     """内部实现函数"""
     try:
+        # 如果提供了自然语言描述，先解析
+        if input_description:
+            parsed = _parse_user_requirements(input_description)
+            # 用解析结果覆盖默认参数
+            if parsed.get("brand"):
+                brand = parsed["brand"]
+            if parsed.get("house_area"):
+                house_area = parsed["house_area"]
+            if parsed.get("max_price"):
+                max_price = parsed["max_price"]
+            if parsed.get("min_suction_power"):
+                min_suction_power = parsed["min_suction_power"]
+            if parsed.get("need_mopping"):
+                need_mopping = parsed["need_mopping"]
+            if parsed.get("navigation_type"):
+                navigation_type = parsed["navigation_type"]
+            if parsed.get("has_pet"):
+                has_pet = parsed["has_pet"]
+            if parsed.get("has_carpet"):
+                has_carpet = parsed["has_carpet"]
+
+        # 有宠物时提高吸力要求
+        if has_pet and min_suction_power < 2500:
+            min_suction_power = 2500
+
         with VacuumRobotRecommender() as recommender:
             results = recommender.recommend_by_criteria(
                 brand=brand,
@@ -100,12 +224,59 @@ def _get_product_count_fn(dummy: Optional[str] = None) -> str:
         return f"查询失败：{str(e)}"
 
 
+def recommend_vacuum_robot_wrapper(input_data: str = "") -> str:
+    """
+    推荐扫地机器人的包装函数，支持接收字符串或JSON作为输入。
+
+    输入可以是：
+    - 自然语言描述："房屋80平米，预算3000元，有宠物，木地板"
+    - JSON字符串：{"house_area": 80, "max_price": 3000, "has_pet": true}
+    """
+    try:
+        # 尝试解析为JSON
+        if input_data and input_data.strip().startswith("{"):
+            try:
+                params = json.loads(input_data)
+                return _recommend_vacuum_robot_fn(**params)
+            except json.JSONDecodeError:
+                pass
+
+        # 解析自然语言描述
+        params = _parse_user_requirements(input_data)
+
+        # 如果解析出参数，使用解析结果
+        if params:
+            return _recommend_vacuum_robot_fn(
+                brand=params.get("brand"),
+                max_price=params.get("max_price", 5000),
+                house_area=params.get("house_area", 100),
+                min_suction_power=params.get("min_suction_power", 1500),
+                need_mopping=params.get("need_mopping", False),
+                navigation_type=params.get("navigation_type"),
+                has_pet=params.get("has_pet", False),
+                limit=5
+            )
+        else:
+            # 没有解析出任何参数，使用默认值
+            return _recommend_vacuum_robot_fn()
+    except Exception as e:
+        return f"推荐系统出现异常：{str(e)}"
+
+
+class RecommendVacuumRobotInput(BaseModel):
+    """推荐扫地机器人的输入"""
+    input_description: str = Field(
+        default="",
+        description="用户需求描述，如：房屋80平米，预算3000元，有宠物，木地板。也可以是JSON格式参数。"
+    )
+
+
 # 使用 StructuredTool 定义工具，明确指定输入 schema
 recommend_vacuum_robot = StructuredTool.from_function(
-    func=_recommend_vacuum_robot_fn,
+    func=recommend_vacuum_robot_wrapper,
     name="recommend_vacuum_robot",
-    description="根据用户需求推荐扫地机器人。可以指定品牌、吸力、导航类型、价格、续航、房屋面积等条件。",
-    infer_schema=True,
+    description="根据用户需求推荐扫地机器人。输入可以是自然语言描述（如'房屋80平米，预算3000元，有宠物'），也可以是JSON参数。系统会自动解析房屋面积、预算、品牌、宠物情况等条件。",
+    args_schema=RecommendVacuumRobotInput,
 )
 
 get_vacuum_brands = StructuredTool.from_function(
