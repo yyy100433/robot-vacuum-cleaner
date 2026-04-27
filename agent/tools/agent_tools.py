@@ -9,6 +9,7 @@ from urllib.request import urlopen
 
 from langchain_core.tools import tool
 from rag.rag_service import RagSummarizeService
+from rag.knowledge_base_service import KnowledgeBaseService
 from utils.config_handler import agent_conf
 from utils.path_tool import get_abs_path
 from utils.logger_handler import logger
@@ -17,6 +18,7 @@ from utils.logger_handler import logger
 from data.products.tools import recommend_vacuum_robot, get_vacuum_brands, get_product_count
 
 rag = RagSummarizeService()
+kb_service = KnowledgeBaseService()
 external_data: Dict[str, Dict[str, dict]] = {}
 
 # 简单的上下文存储，用于在工具间共享会话信息
@@ -489,6 +491,222 @@ def clear_session_context():
     _session_context.clear()
 
 
+# ==================== 知识库管理工具 ====================
+
+@tool
+def list_knowledge_files(page: int = 1, page_size: int = 10, keyword: str = "", file_type: str = ""):
+    """
+    分页获取知识库文件列表。
+
+    Args:
+        page: 页码，从 1 开始，默认第 1 页
+        page_size: 每页数量，默认 10，最大 100
+        keyword: 关键字过滤（文件名），可选
+        file_type: 文件类型过滤，可选（txt/pdf）
+
+    Returns:
+        包含文件列表和分页信息的 JSON 字符串
+    """
+    try:
+        result = kb_service.list_files(page=page, page_size=page_size, keyword=keyword, file_type=file_type)
+        return json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"获取知识库文件列表失败：{e}")
+        return f"获取失败：{str(e)}"
+
+
+@tool
+def get_knowledge_file_detail(filename: str):
+    """
+    获取单个知识文件的详细信息。
+
+    Args:
+        filename: 文件名
+
+    Returns:
+        文件详细信息 JSON 或错误信息
+    """
+    try:
+        detail = kb_service.get_file_detail(filename)
+        if detail:
+            return json.dumps(detail.to_dict(), ensure_ascii=False, indent=2)
+        return f"未找到文件：{filename}"
+    except Exception as e:
+        logger.error(f"获取文件详情失败：{e}")
+        return f"获取失败：{str(e)}"
+
+
+@tool
+def add_knowledge_from_file(file_path: str, force_reload: bool = False):
+    """
+    添加文件到知识库。
+
+    Args:
+        file_path: 文件路径（相对于 data 目录）
+        force_reload: 是否强制重新加载
+
+    Returns:
+        操作结果消息
+    """
+    try:
+        abs_path = get_abs_path(f"data/{file_path}")
+        success, message = kb_service.add_file(abs_path, force_reload=force_reload)
+        return message
+    except Exception as e:
+        logger.error(f"添加文件到知识库失败：{e}")
+        return f"添加失败：{str(e)}"
+
+
+@tool
+def add_knowledge_from_text(content: str, title: str = "手动输入内容"):
+    """
+    直接添加文本内容到知识库。
+
+    Args:
+        content: 文本内容
+        title: 标题（用作文件名）
+
+    Returns:
+        操作结果消息
+    """
+    try:
+        success, message = kb_service.add_text_content(content, title=title)
+        return message
+    except Exception as e:
+        logger.error(f"添加文本到知识库失败：{e}")
+        return f"添加失败：{str(e)}"
+
+
+@tool
+def delete_knowledge_file(filename: str):
+    """
+    删除整个文件的所有切片。
+
+    Args:
+        filename: 文件名
+
+    Returns:
+        操作结果消息
+    """
+    try:
+        success, message = kb_service.delete_file(filename)
+        return message
+    except Exception as e:
+        logger.error(f"删除知识库文件失败：{e}")
+        return f"删除失败：{str(e)}"
+
+
+@tool
+def delete_knowledge_chunk(chunk_id: str):
+    """
+    删除单个知识切片。
+
+    Args:
+        chunk_id: 切片 ID
+
+    Returns:
+        操作结果消息
+    """
+    try:
+        success, message = kb_service.delete_chunk(chunk_id)
+        return message
+    except Exception as e:
+        logger.error(f"删除知识库切片失败：{e}")
+        return f"删除失败：{str(e)}"
+
+
+@tool
+def search_knowledge(query: str, page: int = 1, page_size: int = 10, k: int = 10):
+    """
+    语义搜索知识切片。
+
+    Args:
+        query: 搜索查询
+        page: 页码
+        page_size: 每页数量
+        k: 返回最大数量
+
+    Returns:
+        包含搜索结果和分页信息的 JSON 字符串
+    """
+    try:
+        result = kb_service.search_chunks(query=query, page=page, page_size=page_size, k=k)
+        return json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"搜索知识库失败：{e}")
+        return f"搜索失败：{str(e)}"
+
+
+@tool
+def list_knowledge_chunks(page: int = 1, page_size: int = 10, source: str = "", source_type: str = "", keyword: str = ""):
+    """
+    分页获取知识切片列表。
+
+    Args:
+        page: 页码
+        page_size: 每页数量
+        source: 来源文件过滤
+        source_type: 来源类型过滤
+        keyword: 内容关键字搜索
+
+    Returns:
+        包含切片列表和分页信息的 JSON 字符串
+    """
+    try:
+        result = kb_service.list_chunks(page=page, page_size=page_size, source=source, source_type=source_type, keyword=keyword)
+        return json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"获取知识切片列表失败：{e}")
+        return f"获取失败：{str(e)}"
+
+
+@tool
+def get_knowledge_chunk_detail(chunk_id: str):
+    """
+    获取单个知识切片的详细信息。
+
+    Args:
+        chunk_id: 切片 ID
+
+    Returns:
+        切片详细信息 JSON 或错误信息
+    """
+    try:
+        detail = kb_service.get_chunk_detail(chunk_id)
+        if detail:
+            return json.dumps(detail.to_dict(), ensure_ascii=False, indent=2)
+        return f"未找到切片：{chunk_id}"
+    except Exception as e:
+        logger.error(f"获取切片详情失败：{e}")
+        return f"获取失败：{str(e)}"
+
+
+@tool
+def update_knowledge_content(filename: str, new_content: str):
+    """
+    更新知识库中的文本内容。
+
+    Args:
+        filename: 文件名
+        new_content: 新的内容
+
+    Returns:
+        操作结果消息
+    """
+    try:
+        success, message = kb_service.update_file(filename, new_content)
+        return message
+    except Exception as e:
+        logger.error(f"更新知识库内容失败：{e}")
+        return f"更新失败：{str(e)}"
+
+
+@tool
+def fill_context_for_report(dummy: str = ""):
+    """为报告生成场景注入上下文标记，仅在生成个人使用报告前调用。"""
+    return "fill_context_for_report 已调用"
+
+
 @tool
 def fill_context_for_report(dummy: str = ""):
     """为报告生成场景注入上下文标记，仅在生成个人使用报告前调用。"""
@@ -500,6 +718,11 @@ __all__ = [
     'get_user_profile', 'fetch_external_data', 'fill_context_for_report',
     'create_user_report', 'update_user_profile',
     'recommend_vacuum_robot', 'get_vacuum_brands', 'get_product_count',
+    # 知识库管理工具
+    'list_knowledge_files', 'get_knowledge_file_detail', 'add_knowledge_from_file',
+    'add_knowledge_from_text', 'delete_knowledge_file', 'delete_knowledge_chunk',
+    'search_knowledge', 'list_knowledge_chunks', 'get_knowledge_chunk_detail',
+    'update_knowledge_content',
 ]
 
 # 注意：set_session_context 和 clear_session_context 不是工具，

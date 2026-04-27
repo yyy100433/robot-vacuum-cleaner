@@ -1,4 +1,3 @@
-# 禁用 Chroma 遥测（必须在最前面）
 import os
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 os.environ["CHROMA_DISABLE_TELEMETRY"] = "True"
@@ -74,10 +73,15 @@ from utils.chat_session_store import (
     update_session_messages,
     upsert_session,
 )
-from utils.file_handler import clean_text, pdf_loader
+from utils.file_handler import clean_text, pdf_loader, txt_loader, get_file_md5_hex, listdir_with_allowed_type
 from utils.logger_handler import logger
 from utils.path_tool import get_abs_path
+from utils.config_handler import chroma_conf
 import re
+import shutil
+import hashlib
+import os
+from datetime import datetime
 
 
 st.set_page_config(
@@ -464,7 +468,7 @@ def delete_current_chat() -> None:
 
 def split_response_and_references(content: str) -> tuple[str, list[str]]:
     """
-    把回答正文和“参考来源”拆开。
+    把回答正文和"参考来源"拆开。
 
     RAG 最终返回的是一段完整文本，这里按约定格式拆分，
     方便前端把正文和引用来源分开展示。
@@ -505,8 +509,8 @@ def render_references(references: list[str]):
 
 
 def parse_reference_label(reference: str) -> tuple[str, int | None]:
-    """从“文件名 / 文件名 + 页码”格式中解析出来源和页码。"""
-    match = re.match(r"^(?P<source>.+?)(?: 第(?P<page>\d+)页)?$", reference.strip())
+    """从"文件名 / 文件名 + 页码"格式中解析出来源和页码。"""
+    match = re.match(r"^(?P<source>.+?)(?: 第 (?P<page>\d+) 页)?$", reference.strip())
     if not match:
         return reference.strip(), None
     source = match.group("source").strip()
@@ -542,7 +546,7 @@ def load_reference_preview(reference: str) -> str:
     except FileNotFoundError:
         return f"本地未找到来源文件：{source}"
     except Exception as e:
-        logger.warning(f"加载参考片段失败: {reference}, error={str(e)}")
+        logger.warning(f"加载参考片段失败：{reference}, error={str(e)}")
         return f"无法读取该来源的片段预览：{source}"
 
     return f"当前仅支持预览 txt/pdf 来源，文件：{source}"
@@ -553,6 +557,160 @@ def render_message(message: dict):
     body, references = split_response_and_references(message["content"])
     st.write(body or message["content"])
     render_references(references)
+
+
+# ===== 知识库管理函数 =====
+def get_data_path():
+    """获取知识库数据目录的绝对路径。"""
+    return get_abs_path(chroma_conf["data_path"])
+
+
+def get_uploaded_files():
+    """获取已上传的知识库文件列表。"""
+    data_path = get_data_path()
+    allowed_types = tuple(chroma_conf["allow_knowledge_file_type"])
+    return listdir_with_allowed_type(data_path, allowed_types)
+
+
+def save_uploaded_file(uploaded_file) -> tuple[bool, str]:
+    """
+    保存上传的文件到知识库目录。
+
+    Args:
+        uploaded_file: Streamlit UploadedFile 对象
+
+    Returns:
+        (success: bool, message: str)
+    """
+    try:
+        data_path = get_data_path()
+        os.makedirs(data_path, exist_ok=True)
+
+        # 清理文件名，防止安全问题
+        filename = os.path.basename(uploaded_file.name)
+        # 只保留字母数字和中文字符，以及常见的文件扩展名
+        filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', filename)
+
+        if not filename:
+            return False, "文件名无效"
+
+        file_path = os.path.join(data_path, filename)
+
+        # 检查文件是否已存在
+        if os.path.exists(file_path):
+            # 计算 MD5 判断是否相同文件
+            existing_md5 = get_file_md5_hex(file_path)
+            new_content = uploaded_file.getvalue()
+            new_md5 = hashlib.md5(new_content).hexdigest()
+            if existing_md5 == new_md5:
+                return False, f"文件 '{filename}' 已存在且内容相同"
+            # 文件名相同但内容不同，添加时间戳后缀
+            name, ext = os.path.splitext(filename)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{name}_{timestamp}{ext}"
+            file_path = os.path.join(data_path, filename)
+
+        # 保存文件
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+
+        logger.info(f"文件上传成功：{file_path}")
+        return True, filename
+    except Exception as e:
+        logger.error(f"保存上传文件失败：{str(e)}", exc_info=True)
+        return False, f"保存文件失败：{str(e)}"
+
+
+def delete_knowledge_file(filename: str) -> tuple[bool, str]:
+    """
+    删除知识库中的文件。
+
+    Args:
+        filename: 文件名（相对于 data_path）
+
+    Returns:
+        (success: bool, message: str)
+    """
+    try:
+        data_path = get_data_path()
+        file_path = os.path.join(data_path, filename)
+
+        # 安全检查：确保文件在数据目录内
+        real_file_path = os.path.realpath(file_path)
+        real_data_path = os.path.realpath(data_path)
+        if not real_file_path.startswith(real_data_path):
+            return False, "非法的文件路径"
+
+        if not os.path.exists(file_path):
+            return False, f"文件 '{filename}' 不存在"
+
+        os.remove(file_path)
+        logger.info(f"删除知识库文件：{file_path}")
+        return True, f"已删除 '{filename}'"
+    except Exception as e:
+        logger.error(f"删除文件失败：{str(e)}", exc_info=True)
+        return False, f"删除失败：{str(e)}"
+
+
+def load_document_to_vector_store():
+    """触发向量库重新加载文档。"""
+    try:
+        rag_service.vector_store.load_document(force_reload=True)
+        rag_service._collection_ready_checked = True
+        return True, "知识库更新完成"
+    except Exception as e:
+        logger.error(f"更新知识库失败：{str(e)}", exc_info=True)
+        return False, f"知识库更新失败：{str(e)}"
+
+
+# ===== 新的知识库管理服务（带分页）=====
+
+try:
+    from rag.knowledge_base_service import KnowledgeBaseService
+    kb_manager = KnowledgeBaseService()
+    KB_SERVICE_AVAILABLE = True
+except Exception as e:
+    logger.warning(f"知识库管理服务加载失败：{e}")
+    kb_manager = None
+    KB_SERVICE_AVAILABLE = False
+
+
+def get_kb_file_list(page: int = 1, page_size: int = 10, keyword: str = "", file_type: str = "") -> dict:
+    """获取分页的文件列表"""
+    if not KB_SERVICE_AVAILABLE or kb_manager is None:
+        return {"error": "知识库管理服务不可用"}
+    result = kb_manager.list_files(page=page, page_size=page_size, keyword=keyword, file_type=file_type)
+    return result.to_dict()
+
+
+def get_kb_chunk_list(page: int = 1, page_size: int = 10, source: str = "", source_type: str = "", keyword: str = "") -> dict:
+    """获取分页的切片列表"""
+    if not KB_SERVICE_AVAILABLE or kb_manager is None:
+        return {"error": "知识库管理服务不可用"}
+    result = kb_manager.list_chunks(page=page, page_size=page_size, source=source, source_type=source_type, keyword=keyword)
+    return result.to_dict()
+
+
+def add_kb_text_content(content: str, title: str = "手动输入内容") -> tuple[bool, str]:
+    """添加文本内容到知识库"""
+    if not KB_SERVICE_AVAILABLE or kb_manager is None:
+        return False, "知识库管理服务不可用"
+    return kb_manager.add_text_content(content=content, title=title)
+
+
+def delete_kb_file(filename: str) -> tuple[bool, str]:
+    """删除整个文件"""
+    if not KB_SERVICE_AVAILABLE or kb_manager is None:
+        return False, "知识库管理服务不可用"
+    return kb_manager.delete_file(filename)
+
+
+def search_kb(query: str, page: int = 1, page_size: int = 10, k: int = 10) -> dict:
+    """搜索知识库"""
+    if not KB_SERVICE_AVAILABLE or kb_manager is None:
+        return {"error": "知识库管理服务不可用"}
+    result = kb_manager.search_chunks(query=query, page=page, page_size=page_size, k=k)
+    return result.to_dict()
 
 
 with st.sidebar:
@@ -579,6 +737,194 @@ with st.sidebar:
             switch_session(session["id"])
             st.rerun()
 
+    st.markdown("---")
+    st.markdown("## 📤 上传文档")
+
+    # 文件上传区域
+    uploaded_files = st.file_uploader(
+        "选择要上传的文件（txt/pdf）",
+        type=["txt", "pdf"],
+        accept_multiple_files=True,
+        key="knowledge_uploader",
+        help="支持 txt 和 pdf 格式"
+    )
+
+    if uploaded_files:
+        st.caption(f"已选择 {len(uploaded_files)} 个文件")
+        if st.button("确认上传", key="confirm_upload", use_container_width=True):
+            success_files = []
+            failed_files = []
+            for uploaded_file in uploaded_files:
+                success, msg = save_uploaded_file(uploaded_file)
+                if success:
+                    success_files.append((uploaded_file.name, msg))
+                else:
+                    failed_files.append((uploaded_file.name, msg))
+
+            if success_files:
+                st.success(f"成功上传 {len(success_files)} 个文件")
+                for orig_name, saved_name in success_files:
+                    st.write(f"- {orig_name}")
+
+                # 自动更新知识库
+                with st.spinner("正在更新知识库..."):
+                    ok, msg = load_document_to_vector_store()
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+                st.rerun()
+
+            if failed_files:
+                for name, msg in failed_files:
+                    st.warning(f"{name}: {msg}")
+
+    st.markdown("---")
+    st.markdown("## 知识库管理")
+
+    # 分页参数初始化
+    if "kb_page" not in st.session_state:
+        st.session_state["kb_page"] = 1
+    if "kb_page_size" not in st.session_state:
+        st.session_state["kb_page_size"] = 10
+    if "kb_keyword" not in st.session_state:
+        st.session_state["kb_keyword"] = ""
+    if "kb_file_type" not in st.session_state:
+        st.session_state["kb_file_type"] = ""
+
+    # Tab 切换：文件列表 / 搜索 / 手动添加
+    kb_tabs = st.tabs(["📁 文件列表", "🔍 搜索知识"])
+
+    with kb_tabs[0]:
+        # 过滤条件
+        col_filter1, col_filter2 = st.columns(2)
+        with col_filter1:
+            keyword_input = st.text_input("关键字搜索", value=st.session_state["kb_keyword"], key="kb_keyword_input", placeholder="输入文件名关键字...")
+        with col_filter2:
+            file_type_opt = st.selectbox("文件类型", ["", "txt", "pdf"], key="kb_type_select", index=0 if st.session_state["kb_file_type"] == "" else (2 if st.session_state["kb_file_type"] == "pdf" else 1))
+
+        # 分页设置
+        col_pg1, col_pg2 = st.columns([1, 2])
+        with col_pg1:
+            page_size_options = [5, 10, 20, 50]
+            selected_page_size = st.selectbox("每页数量", page_size_options, index=page_size_options.index(st.session_state["kb_page_size"]) if st.session_state["kb_page_size"] in page_size_options else 1, key="kb_pagesize_select")
+        with col_pg2:
+            st.caption(f"提示：共 {len(get_uploaded_files())} 个文件，当前第 {st.session_state['kb_page']} 页")
+
+        # 更新 session state
+        st.session_state["kb_keyword"] = keyword_input
+        st.session_state["kb_file_type"] = file_type_opt
+        st.session_state["kb_page_size"] = selected_page_size
+
+        # 获取分页数据
+        kb_data = get_kb_file_list(
+            page=st.session_state["kb_page"],
+            page_size=selected_page_size,
+            keyword=keyword_input,
+            file_type=file_type_opt
+        )
+
+        if "error" in kb_data:
+            st.error(kb_data["error"])
+        elif kb_data["total"] == 0:
+            st.info("暂无文档")
+        else:
+            # 显示分页文件列表
+            files = kb_data["items"]
+            for f in files:
+                filename = f.get("filename", "")
+                chunk_count = f.get("chunk_count", 0)
+                created_at = f.get("created_at", "")[:10] if f.get("created_at") else ""
+
+                col_name, col_info, col_del = st.columns([4, 2, 1])
+                with col_name:
+                    st.write(f"📄 **{filename}**")
+                with col_info:
+                    st.caption(f"")
+                with col_del:
+                    if st.button("🗑️", key=f"del_kb_{filename}", help=f"删除 {filename}"):
+                        success, msg = delete_kb_file(filename)
+                        if success:
+                            st.success(msg)
+                            st.session_state["kb_page"] = 1  # 重置到第一页
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+            # 分页导航
+            total_pages = kb_data["total_pages"]
+            current_page = kb_data["page"]
+
+            col_nav1, col_nav2, col_nav3 = st.columns([1, 2, 1])
+            with col_nav1:
+                if current_page > 1:
+                    if st.button("上一页", key="kb_prev_page", use_container_width=True):
+                        st.session_state["kb_page"] = max(1, current_page - 1)
+                        st.rerun()
+                else:
+                    st.caption("上一页")
+
+            with col_nav2:
+                st.caption(f"第 {current_page} / {total_pages} 页")
+
+            with col_nav3:
+                if current_page < total_pages:
+                    if st.button("下一页", key="kb_next_page", use_container_width=True):
+                        st.session_state["kb_page"] = min(total_pages, current_page + 1)
+                        st.rerun()
+                else:
+                    st.caption("下一页")
+
+    with kb_tabs[1]:
+        # 搜索区域
+        search_query = st.text_input("请输入搜索关键词", key="kb_search_input", placeholder="例如：回充失败、漏水处理...")
+        search_k_param = st.slider("返回最多结果数", 1, 50, 10, key="kb_search_k")
+        search_pg_size = st.selectbox("搜索结果每页数量", [5, 10, 20], index=1, key="kb_search_pagesize")
+
+        if st.button("🔍 开始搜索", key="kb_search_btn"):
+            if search_query.strip():
+                with st.spinner("正在搜索..."):
+                    results = search_kb(query=search_query, page=1, page_size=search_pg_size, k=search_k_param)
+                    if "error" in results:
+                        st.error(results["error"])
+                    elif results["total"] == 0:
+                        st.info("未找到相关结果")
+                    else:
+                        st.success(f"找到 {results['total']} 条相关结果")
+                        for i, chunk in enumerate(results["items"], 1):
+                            with st.expander(f"结果 {i}: "):
+                                st.write(chunk.get("content", ""))
+                                st.caption(f"来源：{chunk.get('source', '')} | 类型：{chunk.get('source_type', '')}")
+            else:
+                st.warning("请输入搜索关键词")
+
+
+    # 知识库操作按钮
+    st.markdown("---")
+    col_op1, col_op2 = st.columns(2)
+    with col_op1:
+        if st.button("🔄 重新加载", use_container_width=True):
+            with st.spinner("正在重新加载..."):
+                ok, msg = load_document_to_vector_store()
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+            st.rerun()
+    with col_op2:
+        if st.button("🧹 清空重建", use_container_width=True):
+            if st.checkbox("确认清空？", key="confirm_reset", help="此操作不可恢复"):
+                with st.spinner("正在重建知识库..."):
+                    try:
+                        rag_service.vector_store.reset_store(clear_md5=True)
+                        rag_service.vector_store.load_document(force_reload=True)
+                        rag_service._collection_ready_checked = True
+                        st.success("知识库已重建")
+                        st.rerun()
+                    except Exception as e:
+                        logger.error(f"重建知识库失败：{str(e)}", exc_info=True)
+                        st.error(f"重建失败：{str(e)}")
+
 st.markdown(
     """
     <div class="hero-wrap">
@@ -586,7 +932,6 @@ st.markdown(
         <p class="hero-sub">快速解答选购、故障排查、维护保养与使用技巧，支持多轮对话。</p>
         <span class="stat">知识库问答</span>
         <span class="stat">故障诊断建议</span>
-        <span class="stat">维护提醒</span>
     </div>
     """,
     unsafe_allow_html=True,
@@ -595,37 +940,15 @@ st.markdown(
 st.write("")
 action_cols = st.columns([1, 1, 4])
 if action_cols[0].button("清空会话"):
-    # 清空的是“当前会话”的消息，不影响其他历史会话。
+    # 清空的是"当前会话"的消息，不影响其他历史会话。
     persist_current_messages([])
     st.session_state["pending_prompt"] = ""
     st.rerun()
 
-if action_cols[1].button("重建知识库"):
-    try:
-        with st.spinner("正在重建知识库，请稍候..."):
-            # 这里直接调用当前运行中的 RAG 服务实例，避免页面重启后才生效。
-            rag_service.vector_store.reset_store(clear_md5=True)
-            rag_service.vector_store.load_document(force_reload=True)
-            rag_service._collection_ready_checked = True
-        st.success("知识库重建完成。")
-    except Exception as e:
-        logger.error(f"知识库重建失败: {str(e)}", exc_info=True)
-        st.error("知识库重建失败，请查看日志。")
-
-shortcut_cols = st.columns(3)
-shortcuts = [
-    "我家适合买扫拖一体还是纯扫地？",
-    "机器人不回充了怎么排查？",
-    "怎么做日常维护延长寿命？",
-]
-for col, text in zip(shortcut_cols, shortcuts):
-    if col.button(text):
-        st.session_state["pending_prompt"] = text
-
 current_session = get_current_session()
 current_messages = current_session.get("messages", [])
 
-# 页面展示的始终是“当前会话”的消息。
+# 页面展示的始终是"当前会话"的消息。
 if not current_messages:
     st.info("可以先试试上面的快捷问题，也可以直接在下方输入你的需求。")
 
@@ -636,6 +959,24 @@ for message in current_messages:
 
 input_prompt = st.chat_input("请输入你的问题，例如：拖地有水痕怎么处理？")
 prompt = input_prompt or st.session_state.get("pending_prompt", "")
+
+# 初始化流式输出状态
+if "stream_response" not in st.session_state:
+    st.session_state["stream_response"] = ""
+if "stream_finished" not in st.session_state:
+    st.session_state["stream_finished"] = False
+if "stream_error" not in st.session_state:
+    st.session_state["stream_error"] = None
+if "is_streaming" not in st.session_state:
+    st.session_state["is_streaming"] = False
+
+# 重置流式状态（新对话时）
+if prompt and not st.session_state["stream_finished"]:
+    st.session_state["stream_response"] = ""
+    st.session_state["stream_finished"] = False
+    st.session_state["stream_error"] = None
+    st.session_state["is_streaming"] = True
+
 if prompt:
     st.session_state["pending_prompt"] = ""
     with st.chat_message("user", avatar="🧑"):
@@ -644,59 +985,75 @@ if prompt:
     current_messages = current_messages + [{"role": "user", "content": prompt}]
     persist_current_messages(current_messages)
 
-    response_chunks = []
-
-    def capture(generator, cache_list, placeholder):
-        """一边接收流式输出，一边实时刷新前端占位区域。"""
-        for chunk in generator:
-            cache_list.append(chunk)
-            body, _ = split_response_and_references("".join(cache_list))
-            placeholder.markdown(body or "".join(cache_list))
-            yield chunk
-
     try:
-        import re
-        with st.chat_message("assistant", avatar="🤖"):
-            response_placeholder = st.empty()
-            res_stream = st.session_state["agent"].execute_stream(current_messages)
+        import time
 
-            full_response = []
-            in_planning_mode = False
+        # 创建空容器用于实时更新显示
+        response_placeholder = st.empty()
 
-            for chunk in res_stream:
-                full_response.append(chunk)
-                current_text = "".join(full_response)
+        # 启动流式输出生成器并累积完整响应
+        stream_generator = st.session_state["agent"].execute_stream(current_messages)
 
-                # 检测是否进入规划模式
-                if "🤔 正在分析" in current_text or "📋 执行计划" in current_text:
-                    in_planning_mode = True
+        full_response = []
+        displayed_text = ""
 
-                # 规划模式下，实时显示过程
-                if in_planning_mode:
-                    response_placeholder.markdown(current_text)
-                else:
-                    # 普通模式下，只显示最终结果
-                    pass
+        # 接收后端流式输出并逐字显示
+        for chunk in stream_generator:
+            full_response.append(chunk)
+            displayed_text += chunk
 
-            response_text = "".join(full_response).strip()
+            # 处理参考来源（只在最后处理）
+            if "参考来源" not in displayed_text:
+                body, _ = split_response_and_references(displayed_text)
+                display_text = body or displayed_text
+            else:
+                display_text = displayed_text
 
-            # 最终清理和展示
-            if not response_text:
-                response_text = "暂时没有生成有效回答，请重试。"
-            elif "执行出错" in response_text:
-                response_text = "处理您的问题时遇到了技术问题，请重试或换个方式提问。"
+            # 存储到 session state 用于前端显示
+            st.session_state["stream_response"] = display_text
 
-            # 渲染最终干净的答案
-            body, references = split_response_and_references(response_text)
-            response_placeholder.markdown(body or response_text)
-            render_references(references)
+            # 使用 markdown 实时更新显示
+            response_placeholder.markdown(f"**🤖** {display_text}")
+            time.sleep(0.02)
+
+        # 最终清理和显示完整响应
+        response_text = displayed_text.strip()
+        if not response_text:
+            response_text = "暂时没有生成有效回答，请重试。"
+        elif "执行出错" in response_text:
+            response_text = "处理您的问题时遇到了技术问题，请重试或换个方式提问。"
+
+        # 标记流式输出完成
+        st.session_state["stream_response"] = response_text
+        st.session_state["stream_finished"] = True
+        st.session_state["is_streaming"] = False
+
+        # 显示参考来源
+        body, references = split_response_and_references(response_text)
+        render_references(references)
+
     except Exception as e:
-        logger.error(f"对话处理失败: {str(e)}", exc_info=True)
-        response_text = "服务暂时不可用，请稍后重试。"
-        with st.chat_message("assistant", avatar="🤖"):
-            st.write(response_text)
+        logger.error(f"对话处理失败：{str(e)}", exc_info=True)
+        st.session_state["stream_error"] = "服务暂时不可用，请稍后重试。"
+        st.session_state["stream_finished"] = True
+        st.session_state["is_streaming"] = False
 
-    # 最终回答也要落盘，这样刷新页面后仍能恢复完整会话。
-    current_messages = current_messages + [{"role": "assistant", "content": response_text}]
-    persist_current_messages(current_messages)
+    # 显示流式输出内容
+    with st.chat_message("assistant", avatar="🤖"):
+        if st.session_state["stream_error"]:
+            st.write(st.session_state["stream_error"])
+        else:
+            st.write(st.session_state["stream_response"])
+
+    # 如果流式输出已完成，保存最终结果
+    if st.session_state["stream_finished"] and not st.session_state["stream_error"]:
+        current_messages = current_messages + [{"role": "assistant", "content": st.session_state["stream_response"]}]
+        persist_current_messages(current_messages)
+
     st.rerun()
+else:
+    # 如果是流式输出过程中，显示当前进度
+    if st.session_state.get("is_streaming", False):
+        with st.chat_message("assistant", avatar="🤖"):
+            st.write(st.session_state.get("stream_response", ""))
+        st.rerun()

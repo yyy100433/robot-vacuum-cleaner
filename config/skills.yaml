@@ -15,3 +15,7 @@ skills:
     enabled: true
     priority: 4
     description: "提供保养计划、耗材更换提醒、日常维护指导"
+  knowledge-base-manage:
+    enabled: true
+    priority: 5
+    description: "管理知识库文件，包括添加、删除、搜索和查询知识内容"

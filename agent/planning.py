@@ -392,19 +392,6 @@ class PlanningReactAgent:
         text_lower = text.lower()
         return any(kw in text_lower for kw in self.FALLBACK_KEYWORDS)
 
-    def _try_coze_fallback(self, query: str, chat_history: str) -> tuple[bool, str]:
-        """尝试 Coze fallback"""
-        try:
-            from services.coze_service import coze_service
-            success, answer = coze_service.chat_and_save(query, chat_history)
-            if success and answer:
-                logger.info(f"[INFO] Coze fallback 成功")
-                return True, answer + "\n\n参考来源：\n- Coze 智能体（已自动收录到本地知识库）"
-            return False, ""
-        except Exception as e:
-            logger.error(f"[ERROR] Coze fallback 失败：{e}")
-            return False, ""
-
     def execute(
         self,
         query: str,

@@ -1,9 +1,11 @@
 import os
 import re
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Generator
 
-from langchain.agents import create_react_agent, AgentExecutor
-from langchain.prompts import PromptTemplate
+from langchain.agents import create_agent
+from langchain_classic.agents import AgentExecutor
+from langchain_core.prompts import PromptTemplate
+
 from model.factory import get_chat_model
 from agent.tools.agent_tools import (
     rag_summarize,
@@ -18,11 +20,20 @@ from agent.tools.agent_tools import (
     fill_context_for_report,
     set_session_context,
     clear_session_context,
+    # 知识库管理工具
+    list_knowledge_files,
+    get_knowledge_file_detail,
+    add_knowledge_from_file,
+    add_knowledge_from_text,
+    delete_knowledge_file,
+    delete_knowledge_chunk,
+    search_knowledge,
+    list_knowledge_chunks,
+    get_knowledge_chunk_detail,
+    update_knowledge_content,
 )
 # 导入扫地机器人推荐工具
 from data.products.tools import recommend_vacuum_robot, get_vacuum_brands, get_product_count
-# 导入 Coze 服务（用于 fallback）
-from services.coze_service import coze_service
 # 导入规划模块
 from agent.planning import PlanningReactAgent, should_use_planning
 
@@ -55,6 +66,17 @@ class ReactAgent:
             get_user_profile,
             fetch_external_data,
             fill_context_for_report,
+            # 知识库管理工具
+            list_knowledge_files,
+            get_knowledge_file_detail,
+            add_knowledge_from_file,
+            add_knowledge_from_text,
+            delete_knowledge_file,
+            delete_knowledge_chunk,
+            search_knowledge,
+            list_knowledge_chunks,
+            get_knowledge_chunk_detail,
+            update_knowledge_content,
             # 扫地机器人推荐工具
             recommend_vacuum_robot,
             get_vacuum_brands,
@@ -147,7 +169,7 @@ Thought: {{agent_scratchpad}}"""
             # 使用基础提示词
             prompt = self.prompt
 
-        agent = create_react_agent(
+        agent = create_agent(
             llm=self.llm,
             tools=self.tools,
             prompt=prompt,
@@ -183,9 +205,9 @@ Thought: {{agent_scratchpad}}"""
             role = msg.get("role")
             content = msg.get("content", "")
             if role == "user":
-                history_lines.append(f"用户: {content}")
+                history_lines.append(f"用户：{content}")
             elif role == "assistant":
-                history_lines.append(f"助手: {content}")
+                history_lines.append(f"助手：{content}")
         return "\n".join(history_lines)
 
     @classmethod
@@ -203,7 +225,7 @@ Thought: {{agent_scratchpad}}"""
                     facts["city"] = city
 
             city_match = re.search(
-                r"(?:在|住在|来自|位于)([^\s，。！？,.!?]{2,12}(?:市|县|区|北京|上海|广州|深圳|杭州|苏州|南京|成都|重庆|天津|武汉|西安|长沙|青岛|宁波|厦门|郑州|合肥|福州|济南))",
+                r"(?:在 | 住在|来自 | 位于)([^\s，。！？,.!?]{2,12}(?:市 | 县|区|北京|上海|广州|深圳|杭州|苏州|南京|成都|重庆|天津|武汉|西安|长沙|青岛|宁波|厦门|郑州|合肥|福州|济南))",
                 content,
             )
             if city_match:
@@ -211,7 +233,7 @@ Thought: {{agent_scratchpad}}"""
                 if candidate_city not in cls.INVALID_CITY_VALUES:
                     facts["city"] = candidate_city
 
-            user_id_match = re.search(r"(?:用户ID|ID|id)[：:\s]*([0-9]{3,})", content)
+            user_id_match = re.search(r"(?:用户 ID|ID|id)[：:\s]*([0-9]{3,})", content)
             if user_id_match:
                 facts["user_id"] = user_id_match.group(1)
 
@@ -224,7 +246,7 @@ Thought: {{agent_scratchpad}}"""
         return should_use_planning(input_text, chat_history)
 
     def execute_stream(self, messages: list[dict]):
-        """执行一次带历史上下文的流式对话。"""
+        """执行一次带历史上下文的流式对话（逐字输出）。"""
         normalized_messages = self._normalize_messages(messages)
         session_facts = self._extract_session_facts(normalized_messages)
 
@@ -236,7 +258,7 @@ Thought: {{agent_scratchpad}}"""
                 break
 
         if not last_user_message:
-            yield "没有找到用户消息"
+            yield from self._stream_char_by_char("没有找到用户消息")
             return
 
         # 构建对话历史
@@ -266,13 +288,18 @@ Thought: {{agent_scratchpad}}"""
         # 清理会话上下文
         clear_session_context()
 
+    def _stream_char_by_char(self, text: str) -> Generator[str, None, None]:
+        """逐字符流式输出文本。"""
+        for char in text:
+            yield char
+
     def _execute_with_planning(
         self,
         query: str,
         chat_history: str,
         session_facts: dict
     ):
-        """使用规划模式执行（流式输出）"""
+        """使用规划模式执行（逐字流式输出）"""
         try:
             # 流式执行规划
             for chunk in self.planning_agent.execute_stream(
@@ -281,10 +308,12 @@ Thought: {{agent_scratchpad}}"""
                 city=session_facts.get("city"),
                 user_id=session_facts.get("user_id")
             ):
-                yield chunk
+                # 逐字输出每个 chunk
+                for char in chunk:
+                    yield char
         except Exception as e:
             # 规划执行失败，回退到传统模式
-            print(f"[INFO] 规划执行失败，回退到 ReAct 模式: {e}")
+            print(f"[INFO] 规划执行失败，回退到 ReAct 模式：{e}")
             yield from self._execute_with_react(query, chat_history, session_facts)
 
     def _execute_with_react(
@@ -293,13 +322,13 @@ Thought: {{agent_scratchpad}}"""
         chat_history: str,
         session_facts: dict
     ):
-        """使用传统 ReAct 模式执行"""
-        # 将会话中提取的事实融入问题（如城市、用户ID）
+        """使用传统 ReAct 模式执行（逐字流式输出）"""
+        # 将会话中提取的事实融入问题（如城市、用户 ID）
         enhanced_input = query
         if session_facts.get("city"):
             enhanced_input = f"[用户所在城市：{session_facts['city']}] {enhanced_input}"
         if session_facts.get("user_id"):
-            enhanced_input = f"[用户ID：{session_facts['user_id']}] {enhanced_input}"
+            enhanced_input = f"[用户 ID：{session_facts['user_id']}] {enhanced_input}"
 
         # AgentExecutor 需要的输入格式
         input_dict = {
@@ -311,53 +340,22 @@ Thought: {{agent_scratchpad}}"""
             # 根据输入场景获取对应的 AgentExecutor
             agent_executor = self._get_agent_executor(query)
 
-            # 使用 AgentExecutor.invoke 来完整执行工具调用循环
-            result = agent_executor.invoke(input_dict)
-            # 提取输出 - AgentExecutor 总是返回 dict，有 'output' 字段
-            if isinstance(result, dict):
-                output = result.get("output", "")
-                if not output:
-                    output = "我目前无法回答这个问题。"
-            else:
-                output = str(result)
+            # 使用 stream 进行真正的流式执行，逐字输出
+            for chunk in agent_executor.stream(input_dict):
+                # chunk 是包含 output 的 dict
+                if isinstance(chunk, dict) and "output" in chunk:
+                    output = chunk["output"]
+                    if not output:
+                        output = "我目前无法回答这个问题。"
 
-            # 如果输出为空、无法回答问题，或包含"未找到"/"没有"等关键词，fallback 到 Coze
-            need_fallback = (
-                not output
-                or output == "我目前无法回答这个问题。"
-                or "未找到" in output
-                or "没有符合" in output
-                or "暂时没有" in output
-                or "没有找到" in output
-                or "目前没有找到" in output
-                or output.startswith("很抱歉")
-            )
-
-            if need_fallback:
-                print(f"[INFO] 触发 Coze fallback，原输出：{output[:100]}...")
-                success, answer = coze_service.chat_and_save(query, chat_history)
-
-                if success and answer:
-                    output = answer + chr(10) + chr(10) + "参考来源：" + chr(10) + "- Coze 智能体（已自动收录到本地知识库）"
-                else:
-                    output = "我目前无法回答这个问题，智能体服务也暂时不可用。请稍后重试或尝试换个方式提问。"
-
-            yield output
+                    # 逐字流式输出
+                    for char in output:
+                        yield char
 
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-
-            # Agent 执行异常时，尝试 fallback 到 Coze
-            try:
-                success, answer = coze_service.chat_and_save(query, chat_history)
-                if success and answer:
-                    yield answer + chr(10) + chr(10) + "参考来源：" + chr(10) + "- Coze 智能体（已自动收录到本地知识库）"
-                    return
-            except Exception as coze_e:
-                print(f"[ERROR] Coze fallback 也失败：{coze_e}")
-
-            yield f"执行出错：{str(e)}"
+            error_msg = f"执行出错：{str(e)}"
+            for char in error_msg:
+                yield char
 
 
 if __name__ == '__main__':
