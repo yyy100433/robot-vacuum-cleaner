@@ -879,12 +879,11 @@ with st.sidebar:
         # 搜索区域
         search_query = st.text_input("请输入搜索关键词", key="kb_search_input", placeholder="例如：回充失败、漏水处理...")
         search_k_param = st.slider("返回最多结果数", 1, 50, 10, key="kb_search_k")
-        search_pg_size = st.selectbox("搜索结果每页数量", [5, 10, 20], index=1, key="kb_search_pagesize")
 
         if st.button("🔍 开始搜索", key="kb_search_btn"):
             if search_query.strip():
                 with st.spinner("正在搜索..."):
-                    results = search_kb(query=search_query, page=1, page_size=search_pg_size, k=search_k_param)
+                    results = search_kb(query=search_query, page=1, page_size=search_k_param, k=search_k_param)
                     if "error" in results:
                         st.error(results["error"])
                     elif results["total"] == 0:
@@ -911,19 +910,6 @@ with st.sidebar:
                 else:
                     st.error(msg)
             st.rerun()
-    with col_op2:
-        if st.button("🧹 清空重建", use_container_width=True):
-            if st.checkbox("确认清空？", key="confirm_reset", help="此操作不可恢复"):
-                with st.spinner("正在重建知识库..."):
-                    try:
-                        rag_service.vector_store.reset_store(clear_md5=True)
-                        rag_service.vector_store.load_document(force_reload=True)
-                        rag_service._collection_ready_checked = True
-                        st.success("知识库已重建")
-                        st.rerun()
-                    except Exception as e:
-                        logger.error(f"重建知识库失败：{str(e)}", exc_info=True)
-                        st.error(f"重建失败：{str(e)}")
 
 st.markdown(
     """
@@ -988,49 +974,50 @@ if prompt:
     try:
         import time
 
-        # 创建空容器用于实时更新显示
-        response_placeholder = st.empty()
+        # 直接在 chat_message 容器中流式更新
+        with st.chat_message("assistant", avatar="🤖"):
+            response_placeholder = st.empty()
 
-        # 启动流式输出生成器并累积完整响应
-        stream_generator = st.session_state["agent"].execute_stream(current_messages)
+            # 启动流式输出生成器并累积完整响应
+            stream_generator = st.session_state["agent"].execute_stream(current_messages)
 
-        full_response = []
-        displayed_text = ""
+            full_response = []
+            displayed_text = ""
 
-        # 接收后端流式输出并逐字显示
-        for chunk in stream_generator:
-            full_response.append(chunk)
-            displayed_text += chunk
+            # 接收后端流式输出并逐字显示
+            for chunk in stream_generator:
+                full_response.append(chunk)
+                displayed_text += chunk
 
-            # 处理参考来源（只在最后处理）
-            if "参考来源" not in displayed_text:
-                body, _ = split_response_and_references(displayed_text)
-                display_text = body or displayed_text
-            else:
-                display_text = displayed_text
+                # 处理参考来源（只在最后处理）
+                if "参考来源" not in displayed_text:
+                    body, _ = split_response_and_references(displayed_text)
+                    display_text = body or displayed_text
+                else:
+                    display_text = displayed_text
 
-            # 存储到 session state 用于前端显示
-            st.session_state["stream_response"] = display_text
+                # 存储到 session state 用于前端显示
+                st.session_state["stream_response"] = display_text
 
-            # 使用 markdown 实时更新显示
-            response_placeholder.markdown(f"**🤖** {display_text}")
-            time.sleep(0.02)
+                # 使用 markdown 实时更新显示
+                response_placeholder.markdown(display_text)
+                time.sleep(0.02)
 
-        # 最终清理和显示完整响应
-        response_text = displayed_text.strip()
-        if not response_text:
-            response_text = "暂时没有生成有效回答，请重试。"
-        elif "执行出错" in response_text:
-            response_text = "处理您的问题时遇到了技术问题，请重试或换个方式提问。"
+            # 最终清理和显示完整响应
+            response_text = displayed_text.strip()
+            if not response_text:
+                response_text = "暂时没有生成有效回答，请重试。"
+            elif "执行出错" in response_text:
+                response_text = "处理您的问题时遇到了技术问题，请重试或换个方式提问。"
 
-        # 标记流式输出完成
-        st.session_state["stream_response"] = response_text
-        st.session_state["stream_finished"] = True
-        st.session_state["is_streaming"] = False
+            # 标记流式输出完成
+            st.session_state["stream_response"] = response_text
+            st.session_state["stream_finished"] = True
+            st.session_state["is_streaming"] = False
 
-        # 显示参考来源
-        body, references = split_response_and_references(response_text)
-        render_references(references)
+            # 显示参考来源
+            body, references = split_response_and_references(response_text)
+            render_references(references)
 
     except Exception as e:
         logger.error(f"对话处理失败：{str(e)}", exc_info=True)
@@ -1038,12 +1025,9 @@ if prompt:
         st.session_state["stream_finished"] = True
         st.session_state["is_streaming"] = False
 
-    # 显示流式输出内容
-    with st.chat_message("assistant", avatar="🤖"):
-        if st.session_state["stream_error"]:
+        # 显示错误信息
+        with st.chat_message("assistant", avatar="🤖"):
             st.write(st.session_state["stream_error"])
-        else:
-            st.write(st.session_state["stream_response"])
 
     # 如果流式输出已完成，保存最终结果
     if st.session_state["stream_finished"] and not st.session_state["stream_error"]:

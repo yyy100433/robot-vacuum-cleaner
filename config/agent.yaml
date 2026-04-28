@@ -1,4 +1,3 @@
 external_data_path: data/external/records.csv
 
 coze_enabled: true
-coze_fallback_file: coze_fallback_answers.txt

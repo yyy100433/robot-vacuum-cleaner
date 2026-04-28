@@ -228,11 +228,7 @@ class CozeService:
             '推荐', '哪款', '哪个', '买什么', '怎么选', '选什么', '性价比',
             '排行榜', '对比', '哪个好', '适合', '购买', '值得', '型号', '新款'
         ]
-        if any(kw in query for kw in purchase_keywords):
-            return f"coze_product_recommendations_{datetime.now().strftime('%Y%m%d')}.txt"
 
-        # 默认保存到通用 fallback 文件
-        return "coze_fallback_answers.txt"
 
     def save_answer_to_knowledge(
         self,
@@ -301,9 +297,28 @@ class CozeService:
             是否更新成功
         """
         try:
-            # 使用向量库服务的 load_document 方法进行增量更新
-            # 该方法会自动检测文件变化并只处理新增内容
+            # 获取文件绝对路径
+            from utils.path_tool import get_abs_path
+            data_dir = get_abs_path("data")
+            if not data_dir:
+                logger.error("无法获取知识库数据目录")
+                return False
+
+            file_path = os.path.join(data_dir, source_file)
+
+            # 读取清单，删除指定文件的记录，强制重新加载该文件
+            manifest = self.vector_store._load_manifest()
+            relative_source = os.path.relpath(file_path, data_dir)
+
+            if relative_source in manifest:
+                logger.info(f"强制重新加载文件：{relative_source}")
+                # 从清单中移除该文件，确保下次加载时会重新处理
+                del manifest[relative_source]
+                self.vector_store._save_manifest(manifest)
+
+            # 重新加载所有文档，但指定文件会被强制重新处理
             self.vector_store.load_document(force_reload=False)
+
             logger.info(f"已将 {source_file} 的内容增量更新到向量库")
             return True
         except Exception as e:
@@ -394,7 +409,7 @@ class CozeService:
                 print(f"[DEBUG] 备用解析结果：{parsed_count} 款产品")
 
             # 检查 Coze 是否返回了"找不到"之类的回答
-            no_answer_keywords = ['暂未找到', '没有找到', '抱歉', '无法推荐', '暂无', '不了解', '请提供']
+            no_answer_keywords = ['暂未找到', '没有找到', '抱歉', '无法推荐', '暂无', '不了解', '请提供','技术问题','重试']
             is_no_answer = any(kw in coze_response for kw in no_answer_keywords) and parsed_count == 0
 
             # 如果没有解析到产品，或者 Coze 说找不到，则主动请求产品推荐
@@ -423,10 +438,6 @@ class CozeService:
                             parsed_count = len(products)
                             print(f"[DEBUG] 备用解析（推荐）结果：{parsed_count} 款产品")
 
-                        if products:
-                            # 将推荐回答保存到知识库
-                            self.save_answer_to_knowledge("推荐扫地机器人", recommend_answer,
-                                                          source_file=f"coze_product_recommendations_{datetime.now().strftime('%Y%m%d')}.txt")
 
             # ✅ 修复：如果解析出产品，打印详细信息
             if products:

@@ -4,6 +4,7 @@
 import re
 import threading
 import concurrent.futures
+from typing import TYPE_CHECKING
 
 from rag.vector_store import VectorStoreService
 from utils.config_handler import chroma_conf
@@ -12,6 +13,10 @@ from utils.logger_handler import logger
 from langchain_core.prompts import PromptTemplate
 from model.factory import get_chat_model
 from langchain_core.output_parsers import StrOutputParser
+
+# 使用 TYPE_CHECKING 避免循环导入
+if TYPE_CHECKING:
+    from services.coze_service import CozeService
 
 class RagSummarizeService(object):
     """RAG 服务入口，负责检索、重排、总结和来源整理。"""
@@ -49,6 +54,15 @@ class RagSummarizeService(object):
             "的", "了", "呢", "吗", "呀", "啊", "一下",
             "是否", "一个", "可以", "需要", "有没有", "如何",
         }
+        self._coze_service = None  # 懒加载 Coze 服务
+
+    @property
+    def coze_service(self) -> "CozeService":
+        """懒加载 Coze 服务"""
+        if self._coze_service is None:
+            from services.coze_service import CozeService
+            self._coze_service = CozeService()
+        return self._coze_service
 
     def _init_chain(self):
         """构造“提示词 -> 模型 -> 文本解析”的最小总结链。"""
@@ -153,6 +167,40 @@ class RagSummarizeService(object):
             if term not in self.stopwords:
                 terms.add(term)
         return terms
+
+    def _fallback_to_external_api(self, query: str, chat_history: str, reason: str):
+        """
+        当知识库内容不足时，尝试调用 Coze API 获取答案，并自动保存到知识库。
+
+        Args:
+            query: 用户原始问题
+            chat_history: 对话历史
+            reason: 触发 fallback 的原因
+
+        Returns:
+            Coze 返回的答案（已保存到知识库）
+        """
+        logger.warning(f"知识库内容不足，触发 Coze fallback: {reason}")
+
+        # 调用 Coze 服务并自动保存回答到知识库
+        success, answer = self.coze_service.chat_and_save(query, chat_history)
+
+        if success and answer:
+            logger.info(f"Coze 成功回答问题并已保存到知识库")
+            return answer
+        else:
+            # Coze 也失败时的降级方案
+            logger.error("Coze fallback 也失败，返回默认提示")
+            return (
+                f"抱歉，知识库中暂无关于\"{query[:30]}...\"的详细解答。\n"
+                "这可能是因为：\n"
+                "1. 这是一个较为罕见的故障情况\n"
+                "2. 涉及硬件拆机或专业维修判断\n"
+                "\n"
+                "建议您：\n"
+                "- 联系官方客服获得专业支持\n"
+                "- 提供更多信息以便我们完善知识库"
+            )
 
     @staticmethod
     def _document_terms(content: str) -> set[str]:
@@ -277,13 +325,13 @@ class RagSummarizeService(object):
             answer = answer.strip()
 
             # 检查 LLM 返回是否表明知识库内容不足
-            no_answer_keywords = ['未检索到', '没有找到', '没有足够', '资料不足', '信息不足', '无法回答', '抱歉', '暂无数据', '未接入']
+            no_answer_keywords = ['未检索到相关参考资料', '完全不相关', '完全无法回答', '没有可用信息', '抱歉无法回答', '暂无相关数据']
             is_no_answer = any(kw in answer for kw in no_answer_keywords)
 
             if is_no_answer:
                 # LLM 表示知识库内容不足，触发 Coze fallback
                 logger.info(f"LLM 判断知识库内容不足，触发 Coze fallback")
-                return self._fallback_to_coze(query, chat_history, f"知识库内容不足：{answer[:50]}")
+                return self._fallback_to_external_api(query, chat_history, f"知识库内容不足：{answer[:50]}")
 
             return answer + self._format_references(context_docs)
         except Exception as e:

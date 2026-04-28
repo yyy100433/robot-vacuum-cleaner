@@ -7,6 +7,7 @@ from langchain_classic.agents import AgentExecutor
 from langchain_core.prompts import PromptTemplate
 
 from model.factory import get_chat_model
+from utils.logger_handler import logger
 from agent.tools.agent_tools import (
     rag_summarize,
     get_weather,
@@ -36,6 +37,7 @@ from agent.tools.agent_tools import (
 from data.products.tools import recommend_vacuum_robot, get_vacuum_brands, get_product_count
 # 导入规划模块
 from agent.planning import PlanningReactAgent, should_use_planning
+from services.coze_service import coze_service
 
 
 class ReactAgent:
@@ -341,16 +343,33 @@ Thought: {{agent_scratchpad}}"""
             agent_executor = self._get_agent_executor(query)
 
             # 使用 stream 进行真正的流式执行，逐字输出
+            full_output = []
             for chunk in agent_executor.stream(input_dict):
                 # chunk 是包含 output 的 dict
                 if isinstance(chunk, dict) and "output" in chunk:
                     output = chunk["output"]
                     if not output:
                         output = "我目前无法回答这个问题。"
+                    full_output.append(output)
 
-                    # 逐字流式输出
-                    for char in output:
+            # 组合完整输出
+            combined_output = "".join(full_output)
+
+            # 检查是否返回了 fallback 标记（支持多种格式）
+            if "__FALLBACK_REQUIRED__" in combined_output or "FALLBACK_REQUIRED" in combined_output:
+                logger.info(f"检测到 fallback 标记，调用 Coze 处理：{query}")
+                # 调用 Coze 并保存结果
+                success, coze_answer = coze_service.chat_and_save(query, chat_history)
+                if success and coze_answer:
+                    # 流式输出 Coze 的答案
+                    for char in coze_answer:
                         yield char
+                else:
+                    yield "抱歉，智能客服暂时无法响应，请稍后重试。"
+            else:
+                # 正常输出工具返回的结果
+                for char in combined_output:
+                    yield char
 
         except Exception as e:
             error_msg = f"执行出错：{str(e)}"

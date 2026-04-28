@@ -276,8 +276,9 @@ def recommend_vacuum_robot_wrapper(input_data: str = "") -> str:
             limit=5
         )
 
-        # 如果没有找到匹配产品，返回特殊标记触发fallback
-        if "没有找到符合" in result or "很抱歉" in result:
+
+        # 如果没有找到匹配产品，返回特殊标记触发 fallback
+        if "__FALLBACK_REQUIRED__" in result or "没有找到" in result or "很抱歉" in result:
             return "__FALLBACK_REQUIRED__"
 
         return result

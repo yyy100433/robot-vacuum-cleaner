@@ -10,6 +10,7 @@ from enum import Enum
 from langchain_core.prompts import PromptTemplate
 from model.factory import get_chat_model
 from utils.logger_handler import logger
+from services.coze_service import coze_service
 
 
 class TaskStatus(Enum):
@@ -376,7 +377,8 @@ class PlanningReactAgent:
     FALLBACK_KEYWORDS = [
         "未找到", "没有找到", "没有符合", "暂时没有",
         "目前没有找到", "很抱歉", "无法回答", "知识不足",
-        "信息不足", "暂无数据", "未检索到", "检索不到"
+        "信息不足", "暂无数据", "未检索到", "检索不到",'技术问题','重试',
+        'FALLBACK_REQUIRED'
     ]
 
     def __init__(self, tools: List[Any]):
@@ -391,6 +393,26 @@ class PlanningReactAgent:
             return True
         text_lower = text.lower()
         return any(kw in text_lower for kw in self.FALLBACK_KEYWORDS)
+
+    def _try_coze_fallback(self, query: str, chat_history: str) -> tuple[bool, str]:
+        """
+        尝试调用 Coze 获取答案
+
+        Returns:
+            (success, answer): 是否成功，答案内容
+        """
+        try:
+            logger.info(f"调用 Coze fallback，问题：{query[:50]}...")
+            success, answer = coze_service.chat_and_save(query, chat_history)
+            if success and answer:
+                logger.info(f"Coze fallback 成功，答案长度：{len(answer)}")
+                return True, answer
+            else:
+                logger.warning("Coze fallback 返回失败或空答案")
+                return False, ""
+        except Exception as e:
+            logger.error(f"Coze fallback 调用异常：{str(e)}", exc_info=True)
+            return False, ""
 
     def execute(
         self,
