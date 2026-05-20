@@ -1,18 +1,45 @@
+# Python cache
 __pycache__/
 *.py[cod]
 *$py.class
 
+# Virtual environments
 venv/
 env/
 .venv/
+
+# Environment variables (contains API keys and secrets)
 .env
+.env.local
+.env.*.local
 
+# IDE
 .idea/
+.vscode/
 
+# Logs
 logs/
+*.log
+
+# Database and storage
 storage/
+*.db
+*.sqlite
+*.sqlite3
+md5.txt
+
+# Chroma DB directories
 rag/chroma_db/
 agent/tools/chroma_db/
-*.sqlite3
-*.log
-md5.txt
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
