@@ -140,6 +140,8 @@ allow_knowledge_file_type: ["txt", "pdf"] # 允许的文件类型
 - 需要有效的 DashScope API Key 才能正常使用
 - 首次上传文档时需要等待知识库构建完成
 - 建议上传清晰可读的 PDF 或结构化的 TXT 文档
+- 创建一个.env填入自己的apikey,cozeapitoken和cozebotid
+- 创建一个.env.example填入自己的redis配置和记忆系统配置
 
 ## 许可证
 
